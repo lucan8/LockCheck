@@ -7,7 +7,7 @@
 void detectStarvation(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
-        std::cerr << "Eroare la deschiderea fișierului." << std::endl;
+        std::cerr << "Eroare la deschiderea fisierului." << std::endl;
         return;
     }
 
