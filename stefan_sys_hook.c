@@ -38,26 +38,26 @@ int aquire_log_lock();
 
 //Unlinks lock file, returns 0 on succes, displays error and exit(-1) on failure
 int release_lock();
-
-int manage_res (char* res_name, void* res, const char* instruction, arguments* args)
 struct arguments
 {
     void* data;
 };
+int manage_res (char* res_name, void* res, const char* instruction, struct arguments* args);
+
 int pthread_mutex_lock(pthread_mutex_t* mutex)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
-        mutex
+       { (void*)mutex }
     };
     return manage_res("pthread_mutex", mutex, "lock", args);
 }
 
 int pthread_mutex_unlock(pthread_mutex_t* mutex)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
-        mutex
+       { mutex }
     };
     return manage_res("pthread_mutex", mutex, "unlock", args);
 }
@@ -65,7 +65,7 @@ int pthread_mutex_unlock(pthread_mutex_t* mutex)
 
 int sem_wait(sem_t* semaphore)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         semaphore
     };
@@ -74,7 +74,7 @@ int sem_wait(sem_t* semaphore)
 
 int sem_post(sem_t* semaphore)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         semaphore
     };
@@ -85,7 +85,7 @@ int sem_post(sem_t* semaphore)
 int pthread_create(pthread_t *restrict thread, const pthread_attr_t *restrict attr,
                    void *(*start_routine)(void *), void *restrict arg)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         thread,
         attr,
@@ -97,7 +97,7 @@ int pthread_create(pthread_t *restrict thread, const pthread_attr_t *restrict at
 
 int pthread_join(pthread_t thread, void** retval)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         thread,
         retval
@@ -109,7 +109,7 @@ int pthread_join(pthread_t thread, void** retval)
 int pthread_mutex_init(pthread_mutex_t* restrict mutex,
                        const pthread_mutexattr_t* restrict attr)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         mutex,
         attr
@@ -119,7 +119,7 @@ int pthread_mutex_init(pthread_mutex_t* restrict mutex,
 
 int pthread_mutex_destroy(pthread_mutex_t* mutex)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         mutex
     };
@@ -128,7 +128,7 @@ int pthread_mutex_destroy(pthread_mutex_t* mutex)
 
 int sem_init(sem_t* semaphore, int pshared, unsigned int value)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         semaphore,
         pshared,
@@ -139,7 +139,7 @@ int sem_init(sem_t* semaphore, int pshared, unsigned int value)
 
 int sem_destroy(sem_t* semaphore)
 {
-    arguments args [] =
+    struct arguments args [] =
     {
         semaphore,
     };
@@ -191,7 +191,7 @@ int release_lock()
     printf("Released lock\n");
     return 0;
 }
-int manage_res (char* res_name, void* res, const char* instruction, arguments* args)
+int manage_res (char* res_name, void* res, const char* instruction, struct arguments* args)
 {
     printf("WAIT %s\n", instruction);
     //Busy wait for log lock
@@ -231,14 +231,14 @@ int manage_res (char* res_name, void* res, const char* instruction, arguments* a
     int err = 0;
     if(strcmp(instruction, "lock") == 0 || strcmp(instruction, "wait") == 0)
     {
-        err = try_function(args[0]);
+        err = try_function(args);
         if (err == EBUSY || err == EAGAIN)
         {
             // Print request to log file and release the resource
             fprintf(log_file, "REQUEST %ld %s %p\n", pthread_self(),res_name, res);
             release_lock();
             //Block until mutex is free and reaquire lock to continue printing
-            err = real_function(args[0]);
+            err = real_function(args);
             while(!aquire_log_lock());
         }
         strcpy(log_keyword, "ALLOCATE");
@@ -250,32 +250,32 @@ int manage_res (char* res_name, void* res, const char* instruction, arguments* a
         {
             fprintf(log_file, "DESTROY THREAD %p\n", res);
             release_lock();
-            return real_function(args[0], args[1]);
+            return real_function(args);
         }
         else
         {
             // Making sure real_function returned successfully
             if(strcmp(instruction, "create") == 0)
             {
-                err = real_function(args[0], args[1], args[2], args[3]);
+                err = real_function(args);
                 strcpy(log_keyword, "CREATE");
             }
             if(strcmp(instruction, "init") == 0)
             {
                 if(str_cmp(res_name, "pthread_mutex") == 0)
-                    err = real_function(args[0], args[1]);
+                    err = real_function(args);
                 else
-                    err = real_function(args[0], args[1], args[2]);
+                    err = real_function(args);
                 strcpy(log_keyword, "CREATE");
             }
             if(strcmp(instruction, "destroy") == 0)
             {
-                err = real_function(args[0]);
+                err = real_function(args);
                 strcpy(log_keyword, "DESTROY");
             }
             if(strcmp(instruction, "unlock") == 0 || strcmp(instruction, "post") == 0)
             {
-                err = real_function(args[0]);
+                err = real_function(args);
                 strcpy(log_keyword, "RELEASE");
             }
             if (err != 0)
