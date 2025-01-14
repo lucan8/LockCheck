@@ -9,7 +9,15 @@
 #include <fcntl.h>
 #include <errno.h>
 
-//TODO: Add functions for sem_init and pthread_mutex_init(CREATE MUTEX/SEMAPHORE obj_ptr)
+//TODO: Maybe write a big template function for all the functions below
+// Something like:
+//    - aquire lock
+//    - init log file
+//    - fetch real function
+//    - run real function(or their try equivalent first)
+//    - print approiate instruction to log file
+//    - release lock
+//    - return result of real function
 // No error checking for pthread_mutex_lock, sem_wait and pthread_join
 // Because that would require calling them before printing to file
 // Which means we can't release the lock file
@@ -48,12 +56,24 @@ int pthread_mutex_lock(pthread_mutex_t* mutex){
             exit(1);
         }
     }
-    
-    //Print the request to the log file
-    fprintf(log_file, "REQUEST %ld MUTEX %p\n", pthread_self(), mutex);
+    //Check if the mutex is blocked
+    int err = pthread_mutex_trylock(mutex);
+    if (err == EBUSY){
+        // Print request to log file and release the lock
+        fprintf(log_file, "REQUEST %ld MUTEX %p\n", pthread_self(), mutex);
+        release_lock();
+
+        //Block until mutex is free and reaquire lock to continue printing
+        err = real_mutex_lock(mutex);
+        while(!aquire_log_lock());
+    }
+
+    // After the mutex was taken print allocation message to log file and
+    if (err == 0)
+        fprintf(log_file, "ALLOCATE %ld MUTEX %p\n", pthread_self(), mutex);
     release_lock();
 
-    return real_mutex_lock(mutex);
+    return err;
 }
 
 int pthread_mutex_unlock(pthread_mutex_t* mutex){
@@ -109,11 +129,24 @@ int sem_wait(sem_t* semaphore){
         }
     }
 
-    //Print the request to the log file
-    fprintf(log_file, "REQUEST %ld SEMAPHORE %p\n", pthread_self(), semaphore);
+   //Check if the semaphore is blocked
+    int err = sem_trywait(semaphore);
+    if (err == EAGAIN){
+        // Print request to log file and release the lock
+        fprintf(log_file, "REQUEST %ld SEMAPHORE %p\n", pthread_self(), semaphore);
+        release_lock();
+
+        //Block until semaphore is free and reaquire lock to continue printing
+        err = real_sem_wait(semaphore);
+        while(!aquire_log_lock());
+    }
+
+    // After the semaphore signals print allocation message to log file and
+    if (err == 0)
+        fprintf(log_file, "ALLOCATE %ld SEMAPHORE %p\n", pthread_self(), semaphore);
     release_lock();
 
-    return real_sem_wait(semaphore);
+    return err;
 }
 
 int sem_post(sem_t* semaphore){
@@ -214,6 +247,142 @@ int pthread_join(pthread_t thread, void** retval){
 }
 
 
+int pthread_mutex_init(pthread_mutex_t* restrict mutex,
+                       const pthread_mutexattr_t* restrict attr){
+    printf("WAIT MUTEX INIT\n");
+    //Busy wait for log lock
+    while(!aquire_log_lock());
+
+    printf("PASSED MUTEX INIT\n");
+
+    init_log_file();
+    
+    static int (*real_mutex_init)(pthread_mutex_t* restrict,
+                                  const pthread_mutexattr_t* restrict);
+    if (!real_mutex_init){
+        //Fetch the real pthread_create
+        real_mutex_init = dlsym(RTLD_NEXT, "pthread_mutex_init");
+
+        //Check if mutex_init was found
+        if (!real_mutex_init){
+            printf("Err: Could not fetch the real pthread_mutex_init");
+            exit(1);
+        }
+    }
+
+    //Checking if the mutex was initialized successfully
+    int err = real_mutex_init(mutex, attr);
+    if (err){
+        release_lock();
+        return err;
+    }
+
+    //Print the request to the log file
+    fprintf(log_file, "CREATE MUTEX %p\n", mutex);
+
+    release_lock();
+    return 0;
+}
+
+int pthread_mutex_destroy(pthread_mutex_t* mutex){
+    printf("WAIT MUTEX DESTROY\n");
+    //Busy wait for log lock
+    while(!aquire_log_lock());
+
+    printf("PASSED MUTEX DESTROY\n");
+
+    init_log_file();
+    
+    static int (*real_mutex_destroy)(pthread_mutex_t*);
+    if (!real_mutex_destroy){
+        //Fetch the real pthread_create
+        real_mutex_destroy = dlsym(RTLD_NEXT, "pthread_mutex_destroy");
+        if (!real_mutex_destroy){
+            printf("Err: Could not fetch the real pthread_mutex_destroy");
+            exit(1);
+        }
+    }
+
+    //Checking if the mutex was destroyed successfully
+    int err = real_mutex_destroy(mutex);
+    if (err){
+        release_lock();
+        return err;
+    }
+
+    //Print the instruction to the log file
+    fprintf(log_file, "DESTROY MUTEX %p\n", mutex);
+
+    release_lock();
+    return 0;
+}
+
+int sem_init(sem_t* semaphore, int pshared, unsigned int value){
+    printf("WAIT SEM INIT\n");
+    //Busy wait for log lock
+    while(!aquire_log_lock());
+
+    printf("PASSED SEM INIT\n");
+
+    init_log_file();
+    
+    static int (*real_sem_init)(sem_t*, int, unsigned int);
+    if (!real_sem_init){
+        //Fetch the real pthread_create
+        real_sem_init = dlsym(RTLD_NEXT, "sem_init");
+        if (!real_sem_init){
+            printf("Err: Could not fetch the real sem_init");
+            exit(1);
+        }
+    }
+
+    //Checking if the semaphore was initialized successfully
+    int err = real_sem_init(semaphore, pshared, value);
+    if (err){
+        release_lock();
+        return err;
+    }
+
+    //Print the instruction to log file
+    fprintf(log_file, "CREATE SEMAPHORE %p\n", semaphore);
+
+    release_lock();
+    return 0;
+}
+
+int sem_destroy(sem_t* semaphore){
+    printf("WAIT SEM DESTROY\n");
+    //Busy wait for log lock
+    while(!aquire_log_lock());
+
+    printf("PASSED SEM DESTROY\n");
+
+    init_log_file();
+    
+    static int (*sem_destroy)(sem_t*);
+    if (!sem_destroy){
+        //Fetch the real pthread_create
+        sem_destroy = dlsym(RTLD_NEXT, "sem_destroy");
+        if (!sem_destroy){
+            printf("Err: Could not fetch the real sem_destroy");
+            exit(1);
+        }
+    }
+
+    //Checking if the semaphore was destroyed successfully
+    int err = sem_destroy(semaphore);
+    if (err){
+        release_lock();
+        return err;
+    }
+
+    //Print the instruction to the log file
+    fprintf(log_file, "DESTROY SEMAPHORE %p\n", semaphore);
+
+    release_lock();
+    return 0;
+}
+
 void init_log_file(){
     if (log_file != NULL)
         return;
@@ -250,5 +419,6 @@ int release_lock(){
         perror("Release lock unlink");
         exit(-1);
     }
+    printf("Released lock\n");
     return 0;
 }
