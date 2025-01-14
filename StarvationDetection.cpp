@@ -13,19 +13,19 @@ void detectStarvation(const std::string& filename) {
 
     std::string line;
     std::unordered_map<std::string, int> mutexUsage;
-    
-    std::regex mutexRegex(R"(pthread_mutex_t\s+(\w+);)");           
-    std::regex lockCallRegex(R"(pthread_mutex_lock\(\s*&(\w+)\s*\))"); 
-    std::regex unlockCallRegex(R"(pthread_mutex_unlock\(\s*&(\w+)\s*\))"); 
+
+    std::regex mutexRegex(R"(pthread_mutex_t\s+(\w+);)");
+    std::regex lockCallRegex(R"(pthread_mutex_lock\(\s*&(\w+)\s*\))");
+    std::regex unlockCallRegex(R"(pthread_mutex_unlock\(\s*&(\w+)\s*\))");
 
     while (std::getline(file, line)) {
         std::smatch match;
 
         if (std::regex_search(line, match, mutexRegex)) {
             std::string mutexName = match[1];
-            mutexUsage[mutexName] = 0; 
+            mutexUsage[mutexName] = 0;
         }
-        
+
         if (std::regex_search(line, match, lockCallRegex)) {
             std::string mutexName = match[1];
             if (mutexUsage.find(mutexName) != mutexUsage.end()) {
@@ -51,4 +51,11 @@ void detectStarvation(const std::string& filename) {
                       << " (mutex blocat și neeliberat corespunzător)." << std::endl;
         }
     }
+}
+
+int main() {
+
+    detectStarvation("exemplu.C");
+
+    return 0;
 }
