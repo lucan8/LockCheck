@@ -131,7 +131,7 @@ int sem_init(sem_t* semaphore, int pshared, unsigned int value)
     struct arguments args [] =
     {
         semaphore,
-        pshared,
+        (void*) pshared,
         value
     };
     return manage_res("sem", semaphore, "init", args);
@@ -193,7 +193,7 @@ int release_lock()
 }
 int manage_res (char* res_name, void* res, const char* instruction, struct arguments* args)
 {
-    printf("WAIT %s\n", instruction);
+    printf("WAIT %s %s\n",res_name, instruction);
     //Busy wait for log lock
     while(!aquire_log_lock());
 
@@ -263,7 +263,7 @@ int manage_res (char* res_name, void* res, const char* instruction, struct argum
             }
             if(strcmp(instruction, "init") == 0)
             {
-                if(str_cmp(res_name, "pthread_mutex") == 0)
+                if(strcmp(res_name, "pthread_mutex") == 0)
                     err = real_function(args);
                 else
                     err = real_function(args);
