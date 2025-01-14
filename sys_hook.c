@@ -344,7 +344,7 @@ int sem_init(sem_t* semaphore, int pshared, unsigned int value){
     }
 
     //Print the instruction to log file
-    fprintf(log_file, "CREATE SEMAPHORE %p\n", semaphore);
+    fprintf(log_file, "CREATE SEMAPHORE %u %p\n", value, semaphore);
 
     release_lock();
     return 0;
