@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <errno.h>
 
+//TODO: Add functions for sem_init and pthread_mutex_init(CREATE MUTEX/SEMAPHORE obj_ptr)
 // No error checking for pthread_mutex_lock, sem_wait and pthread_join
 // Because that would require calling them before printing to file
 // Which means we can't release the lock file
