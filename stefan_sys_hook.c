@@ -216,21 +216,22 @@ int manage_res (char* res_name, void* res, const char* instruction, struct argum
             exit(1);
         }
     }
-    static int (*try_function)(void*) = NULL;
-    if (!try_function)
-    {
-        //Fetch the real function
-        try_function = dlsym(RTLD_NEXT, func_try_name);
-        if (!try_function)
-        {
-            printf("Err: Could not fetch the try function");
-            exit(1);
-        }
-    }
+
     char log_keyword[20];
     int err = 0;
     if(strcmp(instruction, "lock") == 0 || strcmp(instruction, "wait") == 0)
     {
+        static int (*try_function)(void*) = NULL;
+	if (!try_function)
+	    {
+		//Fetch the try function
+		try_function = dlsym(RTLD_NEXT, func_try_name);
+		if (!try_function)
+		{
+		    printf("Err: Could not fetch the try function");
+		    exit(1);
+		}
+	    }
         err = try_function(args);
         if (err == EBUSY || err == EAGAIN)
         {
