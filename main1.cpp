@@ -57,6 +57,7 @@ class DetectionThread: public AbstractObj{
 private:
     unordered_map<string, shared_det_res>allocated_res;
     unordered_map<string, shared_det_res>requested_res;
+    unordered_map<string, pair<shared_det_res,int>> res_counter;
 public:
     DetectionThread(const string& s_id): AbstractObj(s_id){}
 
@@ -66,8 +67,16 @@ public:
     // If the request can be completed, insert into allocated,
     // Otherwise in requested
     void request(const string& res_id, const shared_det_res& res){
-        if (res->decreaseCount())
+        if(res_counter.find(res_id) == res_counter.end()){
+            res_counter[res_id] = make_pair(res, -1);
+        }
+        else
+        {
+            res_counter[res_id].second -= 1;
+        }
+        if (res->decreaseCount()){
             allocated_res.insert(make_pair(res_id, res));
+        }
         else
             requested_res.insert(make_pair(res_id, res));
     }
@@ -75,7 +84,18 @@ public:
     //TO DO: Check if it actually exists
     void release(const string& res_id){
         allocated_res.erase(res_id);
+        res_counter[res_id].second += 1;
     }
+    bool check_resources()
+        {
+            for (auto counter : res_counter)
+            {
+                if(counter.second.second != 0){
+                    return 0;
+                }
+            }
+            return 1;
+        }
 };
 
 class DetectionAlgo{
