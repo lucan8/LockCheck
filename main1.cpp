@@ -10,7 +10,6 @@ using namespace std;
 typedef shared_ptr<DetectionResource> shared_det_res;
 
 //TODO: SEE PARSE AND DEADLOCKALGO BELOW
-
 enum ResourceTypes{
     MUTEX = 0,
     SEMAPHORE = 1,
@@ -18,16 +17,12 @@ enum ResourceTypes{
 
 class AbstractObj{
 protected:
-    static unordered_map<string, int> id_map;
-    static size_t id_count;
-    size_t id;
+    string id;
 public:
     // Set the id, increase id count and map the id stirng
-    AbstractObj(const string& s_id): id(id_count++){
-        id_map[s_id] = this->id;
-    }
+    AbstractObj(const string& id): id(id){}
 
-    size_t getId() const{ return id;}
+    const string& getId() const{ return id;}
 };
 
 class DetectionResource: public AbstractObj{
@@ -60,17 +55,17 @@ public:
 
 class DetectionThread: public AbstractObj{
 private:
-    unordered_map<size_t, shared_det_res>allocated_res;
-    unordered_map<size_t, shared_det_res>requested_res;
+    unordered_map<string, shared_det_res>allocated_res;
+    unordered_map<string, shared_det_res>requested_res;
 public:
     DetectionThread(const string& s_id): AbstractObj(s_id){}
 
-    const unordered_map<size_t, shared_det_res>& getAllocatedRes() const {return allocated_res;}
-    const unordered_map<size_t, shared_det_res>& getRequestedRes() const {return requested_res;}
+    const unordered_map<string, shared_det_res>& getAllocatedRes() const {return allocated_res;}
+    const unordered_map<string, shared_det_res>& getRequestedRes() const {return requested_res;}
     
     // If the request can be completed, insert into allocated,
     // Otherwise in requested
-    void request(size_t res_id, const shared_det_res& res){
+    void request(const string& res_id, const shared_det_res& res){
         if (res->decreaseCount())
             allocated_res.insert(make_pair(res_id, res));
         else
@@ -78,25 +73,48 @@ public:
     }
 
     //TO DO: Check if it actually exists
-    void release(size_t res_id){
+    void release(const string& res_id){
         allocated_res.erase(res_id);
     }
 };
 
 class DetectionAlgo{
 protected:
-    vector<DetectionThread*> threads;
-    vector<DetectionResource*> resources;
+    unordered_map<string, DetectionThread> threads;
+    unordered_map<string, DetectionResource> resources;
 public:
     //TODO: One for starvation, one for deadlocks
     bool detect(){}
 
     //TODO: Should be used together with parse when CREATE instr appears
-    void addThread();
-    void addResource();
+    void addThread(const string& s_id);
+    void addResource(const string& s_id, ResourceTypes res_type);
     //TODO: Should be used together with parse when DESTROY instr appears
-    void removeThread();
-    void removeResource();
+    void removeThread(const string& s_id);
+    void removeResource(const string& s_id);
+
+    void parse(const vector<string>& instructions){}
+
+    void parseCreate(const string& obj_type, const string& obj_id){
+        if (obj_type == "THREAD")
+            addThread(obj_id);
+        else if (obj_type == "MUTEX")
+            addResource(obj_id, ResourceTypes::MUTEX);
+        else if (obj_type == "SEMAPHORE")
+            addResource(obj_id, ResourceTypes::SEMAPHORE);
+    }
+
+    void parseDestroy(const string& obj_type, const string& obj_id){
+        if (obj_type == "THREAD")
+            removeThread(obj_id);
+        else if (obj_type == "MUTEX" || obj_type == "SEMAPHORE")
+            removeResource(obj_id);
+    }
+
+    void parseAllocate(const string& thread_id, const string& res_type,
+                       const string& res_id){
+        
+    }
 };
 
 int main(){
@@ -116,21 +134,3 @@ vector<string> split(const string& input_s){
     
     return split_string;
 }
-
-// TODO:
-// void parse(const vector<string>& instructions){
-//     if (instructions[0] == "CREATE")
-//         if (instructions[1] == "THREAD")
-//             continue;
-//         else if (instructions[1] == "MUTEX")
-//             continue;
-//         else if (instructions[1] == "SEMAPHORE")
-//             continue;
-//     else if (instructions[0] == "DESTROY")
-//         if (instructions[1] == "THREAD")
-//             continue;
-//         else if (instructions[1] == "MUTEX")
-//             continue;
-//         else if (instructions[1] == "SEMAPHORE")
-//             continue;
-// }
