@@ -8,14 +8,17 @@
 
 pthread_mutex_t mutex;
 sem_t sem;
-const int nr_threads = 2;
-pthread_t threads[2];
+const int nr_threads = 50;
+pthread_t threads[50];
 int x = 5;
 
 void* runner1(){
     pthread_mutex_lock(&mutex);
     printf("Mutex lock success %ld\n", pthread_self());
-    x++;
+    for (int i = 0; i <= 100; ++i){
+        x += rand() % 15;
+        x -= 7;
+    }
     pthread_mutex_unlock(&mutex);
     printf("Mutex unlock success %ld\n", pthread_self());
 
@@ -57,5 +60,8 @@ int main(){
     for (int i = 0;i < nr_threads; ++i)
         pthread_join(threads[i], NULL);
     printf("Pthread Join succes\n");
+
+    pthread_mutex_destroy(&mutex);
+    sem_destroy(&sem);
 }
 
