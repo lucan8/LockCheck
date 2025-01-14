@@ -107,11 +107,21 @@ public:
     bool detect(){}
 
     //TODO: Should be used together with parse when CREATE instr appears
-    void addThread(const string& s_id);
-    void addResource(const string& s_id, ResourceTypes res_type);
+    void addThread(const string& s_id){
+        DetectionThread* dt = new DetectionThread(s_id);
+        threads.insert(make_pair(s_id, *dt));
+    }
+    void addResource(const string& s_id, ResourceTypes res_type){
+        DetectionResource* dr = new DetectionResource(s_id, res_type);
+        resources.insert(make_pair(s_id, *dr));
+    }
     //TODO: Should be used together with parse when DESTROY instr appears
-    void removeThread(const string& s_id);
-    void removeResource(const string& s_id);
+    void removeThread(const string& s_id){
+        threads.erase(s_id);
+    }
+    void removeResource(const string& s_id){
+        resources.erase(s_id);
+    }
 
     void parse(const vector<string>& instructions){}
 
