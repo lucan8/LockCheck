@@ -8,14 +8,14 @@
 
 pthread_mutex_t mutex;
 sem_t sem;
-const int nr_threads = 50;
-pthread_t threads[50];
+const int nr_threads = 7;
+pthread_t threads[7];
 int x = 5;
 
 void* runner1(){
     pthread_mutex_lock(&mutex);
     printf("Mutex lock success %ld\n", pthread_self());
-    for (int i = 0; i <= 100; ++i){
+    for (int i = 0; i <= 100000000; ++i){
         x += rand() % 15;
         x -= 7;
     }
@@ -28,7 +28,10 @@ void* runner1(){
 void* runner2(){
     sem_wait(&sem);
     printf("Sem wait success %ld\n", pthread_self());
-    x++;
+    for (int i = 0; i <= 100000000; ++i){
+        x += rand() % 10;
+        x -= 5;
+    }
     sem_post(&sem);
     printf("Sem post success %ld\n", pthread_self());
 
