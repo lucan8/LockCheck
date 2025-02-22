@@ -37,6 +37,8 @@ int aquire_log_lock();
 //Unlinks lock file, returns 0 on succes, displays error and exit(-1) on failure 
 int release_lock();
 
+// TODO: A fprintf that takes the lock, prints, calls fflush and fsync, releases the lock
+void myFprintf();
 
 int pthread_mutex_lock(pthread_mutex_t* mutex){
     // printf("WAIT MUTEX LOCK\n");
@@ -61,6 +63,9 @@ int pthread_mutex_lock(pthread_mutex_t* mutex){
     if (err == EBUSY){
         // Print request to log file and release the lock
         fprintf(log_file, "REQUEST %ld MUTEX %p\n", pthread_self(), mutex);
+        fflush(log_file);
+        fsync(fileno(log_file));
+
         release_lock();
 
         //Block until mutex is free and reaquire lock to continue printing
@@ -71,6 +76,8 @@ int pthread_mutex_lock(pthread_mutex_t* mutex){
     // After the mutex was taken print allocation message to log file and
     if (err == 0)
         fprintf(log_file, "ALLOCATE %ld MUTEX %p\n", pthread_self(), mutex);
+    else
+        perror("[ERROR] pthread_mutex_lock");
     
     //Making sure data gets to the disk
     fflush(log_file);
@@ -132,26 +139,30 @@ int sem_wait(sem_t* semaphore){
         //Fetch the real sem_wait
         real_sem_wait = dlsym(RTLD_NEXT, "sem_wait");
         if (!real_sem_wait){
-            printf("Err: Could not fetch the real sem_wait");
+            printf("[ERROR]: Could not fetch the real sem_wait");
             exit(1);
         }
     }
 
    //Check if the semaphore is blocked
     int err = sem_trywait(semaphore);
-    if (err == EAGAIN){
+    if (err == -1 && errno == EAGAIN){
         // Print request to log file and release the lock
         fprintf(log_file, "REQUEST %ld SEMAPHORE %p\n", pthread_self(), semaphore);
+        fflush(log_file);
+        fsync(fileno(log_file));
+
         release_lock();
 
         //Block until semaphore is free and reaquire lock to continue printing
         err = real_sem_wait(semaphore);
         while(!aquire_log_lock());
     }
-
     // After the semaphore signals print allocation message to log file and
     if (err == 0)
         fprintf(log_file, "ALLOCATE %ld SEMAPHORE %p\n", pthread_self(), semaphore);
+    else
+        perror("[ERROR] sem_wait");
     
     //Making sure data gets to the disk
     fflush(log_file);
@@ -258,8 +269,8 @@ int pthread_join(pthread_t thread, void** retval){
     // If join is successful aquire lock to write to log file
     if (err == 0){
         // printf("WAIT PTHREAD JOIN\n");
-        // //Busy wait for log lock
-        // while(!aquire_log_lock());
+        //Busy wait for log lock
+        while(!aquire_log_lock());
 
         // printf("PASSED PTHREAD JOIN\n");
 
@@ -452,7 +463,7 @@ int aquire_log_lock(){
         perror("aquire_log_lock file open");
         exit(-1);
     }
-    printf("Lock aquired\n");
+    printf("Suspect file: Lock aquired\n");
     close(fd);
     return 1;
 }
@@ -460,9 +471,9 @@ int aquire_log_lock(){
 int release_lock(){
     int err = unlink(lock_file_name);
     if (err){
-        perror("Release lock unlink");
+        perror("Suspect file: Release lock unlink");
         exit(-1);
     }
-    printf("Released lock\n");
+    printf("Suspect file: Released lock\n");
     return 0;
 }
