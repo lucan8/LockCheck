@@ -14,10 +14,12 @@
 #include <algorithm>
 #include <exception>
 #include <cstring>
+#include <string>
 using namespace std;
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
-// Found bug on DetectionThread::release() : can't iterate over a container and remove from it at the same time
+// Found bug in allocateFromRequested: if the allocation throws exception, the next iterator does not get returned
+// So we are stuck in an infinite loop
 
 //TODO: Write unsafe thread exception
 // When debugging I found there can be threads waiting for a resource without it being allocated to anyone
@@ -27,19 +29,40 @@ using namespace std;
 // TODO: We don't actually need to reallocate from requested before
 // freeing a safe thread, but we need to modify the destructor
 // to check for requested
-// class MyException : public exception{
-// private:
-//     string msg;
-//     string func_name;
-// public:
-//     virtual const char* what() const noexcept {
-//         return ("[ERROR]: In " + string(__FILENAME__) + ", function " + func_name + " , line " + to_string(__LINE__) + ": " + msg).c_str();
-//     }
-// }
-//class fullResourceException;
+
 static const char lock_file_name[] = "lock_file.lock";
+// Classes used for deadlock detection
 class DetectionResource;
 class DetectionThread;
+class DetectionAlgo;
+
+//User defined Exceptions
+class Myexception;
+class FullResourceException;
+class EmptyResourceException;
+class ResourceNotFoundException;
+
+typedef shared_ptr<DetectionResource> shared_det_res;
+typedef unique_ptr<DetectionThread> unique_det_thread;
+typedef shared_ptr<DetectionThread> shared_det_thread;
+
+
+enum ResourceTypes{
+    MUTEX = 0,
+    SEMAPHORE = 1,
+};
+
+// Not used at the moment
+enum MessageTypes{
+    OK,
+    WARNING,
+    ERROR,
+    DEBUG
+};
+
+string toString(ResourceTypes res_type);
+string toString(MessageTypes msg_type); //Not used at the moment
+
 vector<string> split(const string& input_file);
 off_t getFileSize(const string& file_name);
 
@@ -49,14 +72,53 @@ int aquire_log_lock();
 
 //Unlinks lock file, returns 0 on succes, displays error and exit(-1) on failure 
 int release_lock();
-typedef shared_ptr<DetectionResource> shared_det_res;
-typedef unique_ptr<DetectionThread> unique_det_thread;
-typedef shared_ptr<DetectionThread> shared_det_thread;
-enum ResourceTypes{
-    MUTEX = 0,
-    SEMAPHORE = 1,
+
+class MyException : public exception{
+protected:
+    string file_name, func_name, line, msg;
+public:
+    MyException(const string& file_name, const string& func_name, int line)
+        : file_name(file_name), func_name(func_name), line(to_string(line)){
+            msg = "In " + file_name + ", function " + func_name + " , line " + this->line + ": ";
+        }
+    virtual const char* what() const noexcept {
+        return msg.c_str();
+    }
+};
+    
+class FullResourceException : public MyException{
+private:
+   const string& res_id;
+   string res_type;
+public:
+    FullResourceException(const string& file_name, const string& func_name, int line,  const string& res_id, ResourceTypes res_type)
+    : MyException(file_name, func_name, line), res_id(res_id), res_type(toString(res_type)){
+        msg += " resource " + res_id + " " + this->res_type + " is full";
+    }
 };
 
+class EmptyResourceException : public MyException{
+private:
+    const string& res_id;
+    string res_type;
+public:
+EmptyResourceException(const string& file_name, const string& func_name, int line,  const string& res_id, ResourceTypes res_type)
+    : MyException(file_name, func_name, line), res_id(res_id), res_type(toString(res_type)){
+        msg += " resource " + res_id + " " + this->res_type + " is empty";
+    }
+};
+
+class ResourceNotFoundException: public MyException{
+private:
+    const string& res_id;
+public:
+    ResourceNotFoundException(const string& file_name, const string& func_name, int line, const string& res_id)
+    : MyException(file_name, func_name, line), res_id(res_id){
+        msg += " resource " + res_id + " not found";
+    }
+};
+
+    
 class DetectionResource{
 private:
     string id;
@@ -77,26 +139,24 @@ public:
     size_t getMaxCount() const {return max_count;}
     const string& getId() const {return id;}
 
-    // Increases count only until max_count, returns true if successfull,
-    // False otherwise
-    bool increaseCount() {
-        if (count >= max_count)
-            return false;
+    // Throws error is resource is full
+    void increaseCount() {
+        if (isFull())
+            throw FullResourceException(__FILENAME__, __func__, __LINE__, this->id, this->res_type);
 
         count++;
-        return true;
     }
 
-    // Decreases count only until 0, returns true if successfull, false otherwise
-    bool decreaseCount(){
+    // Throws error if resource is locked
+    void decreaseCount(){
         if (isLocked())
-            return false;
+            throw EmptyResourceException(__FILENAME__, __func__, __LINE__, this->id, this->res_type);
         
         count--;
-        return true;
     }
 
     bool isLocked(){return count <= 0;}
+    bool isFull() {return count >= max_count;}
 
     friend ostream& operator<<(ostream& out, const DetectionResource& res);
 };
@@ -108,33 +168,30 @@ private:
     unordered_map<string, shared_det_res>requested_res;
     unordered_map<string, pair<shared_det_res, int>> res_counter;
 
-    // Tries to allocate the resource, returns true if successfull, false otherwise
-    bool _allocate(const string& res_id,  shared_det_res res){
-        bool successfull = res->decreaseCount();
-        if (successfull)
-            allocated_res.insert(make_pair(res_id, move(res)));
-        return successfull;
+    // Tries to allocate the resource, throws error if resource is locked
+    void _allocate(const string& res_id,  shared_det_res res){
+        res->decreaseCount();
+        allocated_res.insert(make_pair(res_id, move(res)));
     }
 
-    // Move resource from requested to allocated
-    bool _allocateFromRequested(const string& res_id){
-        // Get the resource by id
-        auto found_res = requested_res.find(res_id);
+    // Moves the resource from requested to allocated
+    // Can throw if the resource is locked or not found in the requested container
+    void _allocateFromRequested(const shared_det_res& res){
+        if (res->isLocked())
+            throw EmptyResourceException(__FILENAME__, __func__, __LINE__, res->getId(), res->getResType());
         
-        if (found_res != requested_res.end()){
-            // Trying to allocate the requested resource
-            bool succesfull = this->_allocate(found_res->first, found_res->second);
-            
-            // If successfull, erase the resource from the requested container
-            if (succesfull)
-                requested_res.erase(res_id);
-            return succesfull;   
-        }
-        return false;
+        // Trying to extract resource only after we are sure it's not locked
+        auto found_res = requested_res.extract(res->getId());
+        if (found_res.empty())
+            throw ResourceNotFoundException(__FILENAME__, __func__, __LINE__, this->id);
+        
+        // Will do an extra isLocked check unfortunately
+        this->_allocate(move(found_res.key()), move(found_res.mapped()));
     }
 
     // Helper function for the two public releases()
     // Increases the count on the resource an prints appropriate message to console
+    // Can throw error if resource is full
     void _release (DetectionResource& res){
         // Increase count for resource
         res.increaseCount();
@@ -167,38 +224,52 @@ public:
             res_counter[res_id].second -= 1;
     }
 
-    bool allocate(const string& res_id, shared_det_res res){
+    // Tries to allocate from requested
+    // If not found in the request vector allocates normally
+    // Throws error if the resource is locked
+    void allocate(const string& res_id, shared_det_res res){
         // allocateResCounter(res_id, res);
         // cout << "After allocate res count: " << res_counter[res_id].second << endl;
         
-        // First try to allocate from requested
-        bool successfull = this->_allocateFromRequested(res_id);
-
-        // If that fails, allocate normally
-        if (!successfull)
-            successfull = this->_allocate(res_id, move(res));
-        return successfull;
+        // First try to allocate from requested, if not found allocate the resource normally
+        try{
+            cout << "Moving from requested\n";
+            this->_allocateFromRequested(res);
+        } catch (ResourceNotFoundException& e){
+            cout << "Move failed. Allocate normally\n";
+            this->_allocate(res_id, move(res));
+        }
     }
 
     // Moves as much as possible from requested to allocated
     void allocateFromRequested(){
-        for (const auto& res: this->requested_res)
-            this->_allocateFromRequested(res.first);
+        for (auto it = requested_res.begin(); it != requested_res.end();){
+            // Ignoring locked resources
+            if (it->second->isLocked())
+                continue;
+            
+            // Moving resource from requested to allocated
+            auto res = requested_res.extract(it++);
+            this->_allocate(move(res.key()), move(res.mapped()));
+        }
     }
 
     void request(const string& res_id, shared_det_res res){
-        requested_res.insert(make_pair(res_id, res));
+        requested_res.insert(make_pair(res_id, move(res)));
     }
     
     
     // Releases resource with res_id
+    // Throws error if not found or resource is full
     void release(const string& res_id){
         // cout << "Small release " << res_id << '\n';
+
         // Remove and store the resource
         auto found_res = allocated_res.extract(res_id);
+        if (found_res.empty())
+            throw ResourceNotFoundException(__FILENAME__, __func__, __LINE__, res_id);
 
-        if (!found_res.empty())
-            this->_release(*found_res.mapped());
+        this->_release(*found_res.mapped());
     }
 
 
@@ -210,7 +281,6 @@ public:
             // Release the resource
             this->_release(*res.mapped());
         }
-       
     }
 
     // True if no requests exist, false otherwise
@@ -218,8 +288,7 @@ public:
         return requested_res.empty();
     }
 
-    // True if there is no locked resource in the requested container
-    // False otherwise
+    // True if there is no locked resource in the requested container, false otherwise
     bool canFulfillAllReq(){
         for (const auto& r: requested_res)
             if (r.second->isLocked())
@@ -238,6 +307,7 @@ public:
         return true;
     }
     
+    // Compares threads by their number of requests
     friend bool compByNrReq(const DetectionThread& t1, const DetectionThread& t2);
 };
 
@@ -272,9 +342,12 @@ protected:
             cout << "Allocate " << res_type << " for Thread: " 
                  << thread_id << " successfull" << endl;
         } catch(out_of_range& e){
-            cerr << "Allocate: " << res_type << " Thread not found: " 
+            cout << "[ERROR] Allocate: " << res_type << " Thread not found: " 
                  << thread_id << endl;
         }
+        // catch (EmptyResourceException& e){
+        //     cout << "[ERROR]" << e.what() << '\n';
+        // }
 
         // if (!isSafeState())
         //     throw runtime_error("DEADLOCK DETECTED");
@@ -351,10 +424,11 @@ protected:
         cout << "       Cloning thread allocations...\n";
         for (const auto& t_r: cloned_res){
             cout << "               Resource: " << *(t_r.second) << '\n';
+            
             const string& t_res_id = t_r.first;
             const shared_det_res& t_clone_res = clone_algo.resources.at(t_res_id);
-            if (!clone_thread->allocate(t_res_id, t_clone_res))
-                cout << "Allocate failed\n";
+        
+            clone_thread->allocate(t_res_id, t_clone_res);
         }
         cout << "       Cloned " << cloned_res.size() << " allocations\n";
     }
@@ -374,17 +448,6 @@ protected:
         cout << "       Cloned " << cloned_res.size() << " requests\n";
     }
 
-    // Returns a vector of threads' ids that can fulfill all their requests
-    vector<string> getSafeThreads(){
-        vector<string> safe_t_ids;
-        safe_t_ids.reserve(threads.size());
-
-        for (auto& t: threads)
-            if (t.second->canFulfillAllReq())
-                safe_t_ids.push_back(t.first);
-        
-        return safe_t_ids;
-    }
 public:
     bool detect(){}
 
@@ -398,6 +461,7 @@ public:
         return clone_algo;
     }
 
+    // Frees safe threads until either there is only one thread remaining or no safe threads exist
     bool isSafeState(){
         // Getting current state of the algorithm
         DetectionAlgo clone_algo = clone();
@@ -405,27 +469,23 @@ public:
         cout << "isSafeState: \n";
         int i = 0;
 
-        while (clone_algo.threads.size() > 1){
+        // An iteration is safe only if there exists at least one thread that can fulfill all it's requests
+        bool is_safe = 1;
+        
+        while (clone_algo.threads.size() > 1 && is_safe){
             cout << "   Iteration " << i << '\n';
 
-            vector<string> safe_threads = clone_algo.getSafeThreads();
-            cout << "       Found " << safe_threads.size() << " safe threads\n";
+            is_safe = false;
+            // Removing the threads that can fullfill all their requests and freeing their resources
+            for (auto it = clone_algo.threads.begin(); it != clone_algo.threads.end();)
+                if (it->second->canFulfillAllReq()){
+                    is_safe = true;
+                    it->second->allocateFromRequested();
+                    clone_algo.threads.erase(it++);
+                }
+                else
+                    it++;
 
-            // If no threads can exit, we found a deadlock
-            if (safe_threads.empty()){
-                cout << "       No safe threads found\n" << "       Remaining Threads: " << clone_algo.threads.size() << '\n';
-                return false;
-            }
-            
-            cout << "       Reallocating resources for safe threads\n";
-            // Fulfill the safe thread's requests
-            for (auto& t_id: safe_threads)
-                clone_algo.threads[t_id]->allocateFromRequested();
-            
-            cout << "       Removing safe threads\n";
-            // Removing each thread that can exit and freeing their resources
-            for (const auto& t_id: safe_threads)
-                clone_algo.removeThread(t_id);
             i++;
         }
         return true;
@@ -442,7 +502,7 @@ public:
         resources.insert(make_pair(res_id,
                                    make_shared<DetectionResource>(res_id, res_type, count)));
         
-        cout << "Deadlock detection: Added resource " << res_id << endl;
+        cout << "Deadlock detection: Added resource " << *resources[res_id] << '\n';
     }
     
     // Releases all thread resources and removes it, if it can fulfill all it's requests
@@ -481,6 +541,7 @@ public:
             parseRelease(instructions[1], instructions[2], instructions[3]);
     }
 };
+
 
 int main(){
     const char log_file_name[] = "log_file.txt";
@@ -552,6 +613,7 @@ int main(){
             }
         }
     }
+
 }
 
 int aquire_log_lock(){
@@ -562,7 +624,7 @@ int aquire_log_lock(){
         perror("aquire_log_lock file open");
         exit(-1);
     }
-    printf("Lock aquired\n");
+    cout << "Deadlock Detection: Lock aquired\n";
     close(fd);
     return 1;
 }
@@ -570,10 +632,10 @@ int aquire_log_lock(){
 int release_lock(){
     int err = unlink(lock_file_name);
     if (err){
-        perror("Release lock unlink");
+        perror("Deadlock Detection: Release lock unlink");
         exit(-1);
     }
-    cout << "Released lock\n";
+    cout << "Deadlock Detection: Released lock\n";
     return 0;
 }
 // Splits by space the input string into a vector of strings
@@ -600,11 +662,33 @@ bool compByNrReq(const DetectionThread& t1, const DetectionThread& t2){
     return t1.requested_res.size() < t2.requested_res.size();
 }
 
+string toString(ResourceTypes res_type){
+    switch (res_type){
+        case MUTEX:
+            return "MUTEX";
+        case SEMAPHORE:
+            return "SEMAPHORE";
+        default:
+            return "";
+    }
+}
+
+string toString(MessageTypes msg_type){
+    switch (msg_type){
+        case OK:
+            return "OK";
+        case WARNING:
+            return "WARNING";
+        case ERROR:
+            return "ERROR";
+        case DEBUG:
+            return "DEBUG";
+        default:
+            return "";
+    }
+}
+
 ostream& operator<<(ostream& out, const DetectionResource& res){
-    out << res.id << " ";
-    if (res.res_type == ResourceTypes :: MUTEX)
-        out << "MUTEX " << res.count;
-    else
-        out << "SEMAPHORE " << res.count << "/" << res.max_count; 
+    out << res.id << " " << toString(res.res_type) << " " << res.count << "/" << res.max_count; 
     return out;
 }
