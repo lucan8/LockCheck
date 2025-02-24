@@ -18,11 +18,12 @@
 using namespace std;
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
-// Found bug in allocateFromRequested: if the allocation throws exception, the next iterator does not get returned
-// So we are stuck in an infinite loop
+
+// Deadlock detection seems to work(finally)
+// For now we are just killing the process and printing
+// We need to think about recovery now
 
 //TODO: Write unsafe thread exception
-// When debugging I found there can be threads waiting for a resource without it being allocated to anyone
 // I also found that this algorithm can detect both deadlocks and starvation
 // But further thinking is needed to differentiate between the two
 // TODO: Make abstract class Object that has an id
@@ -470,7 +471,7 @@ public:
         int i = 0;
 
         // An iteration is safe only if there exists at least one thread that can fulfill all it's requests
-        bool is_safe = 1;
+        bool is_safe = true;
         
         while (clone_algo.threads.size() > 1 && is_safe){
             cout << "   Iteration " << i << '\n';
@@ -479,16 +480,19 @@ public:
             // Removing the threads that can fullfill all their requests and freeing their resources
             for (auto it = clone_algo.threads.begin(); it != clone_algo.threads.end();)
                 if (it->second->canFulfillAllReq()){
+                    cout << "       Removing thread " << it->first << '\n';
                     is_safe = true;
                     it->second->allocateFromRequested();
                     clone_algo.threads.erase(it++);
                 }
                 else
                     it++;
-
+            
+            cout << "       Remaining threads: " << clone_algo.threads.size() << '\n';
+            cout << "   Iteration " << i << " finished\n";
             i++;
         }
-        return true;
+        return is_safe;
     }
 
     void addThread(const string& t_id){
@@ -509,14 +513,14 @@ public:
     bool removeThread(const string& t_id){
         // if (!threads.at(t_id)->check_resources())
         //     throw runtime_error("Starvation detected\n");
-        if (threads.at(t_id)->canFulfillAllReq()){
+        //if (threads.at(t_id)->canFulfillAllReq()){
             if (threads.erase(t_id))
                 cout << "Deadlock detection: Removed thread " << t_id << endl;
             else
                 cout << "Deadlock detection: could not remove thread " << t_id << endl;
             return true;
-        }
-        throw runtime_error("Thread " + t_id + "tried to exit in an unsafe state");
+        //}
+        //throw runtime_error("Thread " + t_id + "tried to exit in an unsafe state");
     }
 
     void removeResource(const string& res_id){
@@ -542,6 +546,19 @@ public:
     }
 };
 
+// Waits non-blockingly for children and returns the number of terminated children
+int checkChildren(){
+    int status;
+    int term_child_count = 0;
+    pid_t pid = waitpid(-1, &status, WNOHANG);
+
+    while (pid > 0){
+        cout << "Process " << pid << " terminated with status code: " << status << '\n';
+        pid = waitpid(-1, &status, WNOHANG);
+        term_child_count++;
+    }
+    return term_child_count;
+}
 
 int main(){
     const char log_file_name[] = "log_file.txt";
@@ -556,15 +573,16 @@ int main(){
     std::streampos fin_pos = 0;
     ofstream fout(parent_debug_log_name);
 
+    int rem_child_count = 1;
     pid_t pid = fork();
 
     //Child writes
     if (pid == 0){
         cout << "Child is executing...\n";
-        char* args[] = {"test1", NULL};
+        char* args[] = {"test_complex1", NULL};
         // Using the hooked functions
         char* env[] = {"LD_PRELOAD=./sys_hook.so", NULL};
-        int err = execve("test1", args, env);
+        int err = execve("test_complex1", args, env);
         if (err < 0){
             perror("Child execve");
             return -1;
@@ -572,8 +590,10 @@ int main(){
     }
     else{ //Parent reads
         cout << "Parent is executing...\n";
+        cout << "Child pid is " << pid << '\n';
         DetectionAlgo deadlock_det;
-        while(true){
+        // Execute until all children finished execution
+        while(rem_child_count > 0){
             // Checking if there was actually something appended to the log file
             off_t curr_file_size = getFileSize(log_file_name);
             if (curr_file_size > file_size){
@@ -601,7 +621,9 @@ int main(){
                         try{
                             deadlock_det.parse(split_instr);
                         } catch(runtime_error& e){
-                            cout << e.what();
+                            cout << e.what() << '\n';
+                            cout << "Terminating process: " << pid << '\n';
+                            kill(pid, SIGKILL);
                         }
                     }
                 }
@@ -609,10 +631,17 @@ int main(){
                 fin.clear();
                 // Keep track of the last read positon
                 fin_pos = fin.tellg();
+                
+                // Checking for terminated children
+                // Done before releasing lock to avoid them writing to the file and terminating exactly before checking,
+                // As the changes would not be seen by the parent
+                rem_child_count -= checkChildren();
+
                 release_lock();
             }
         }
     }
+    
 
 }
 
