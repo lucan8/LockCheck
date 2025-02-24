@@ -8,6 +8,7 @@
 #include <semaphore.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stdarg.h>
 
 //TODO: Maybe write a big template function for all the functions below
 // Something like:
@@ -25,6 +26,7 @@
 static FILE* log_file = NULL;
 static const char log_file_name[] = "log_file.txt";
 static const char lock_file_name[] = "lock_file.lock";
+static const char sys_hook_err_file[] = "sys_hook_err_file.txt";
 
 void init_log_file();
 
@@ -37,16 +39,10 @@ int aquire_log_lock();
 //Unlinks lock file, returns 0 on succes, displays error and exit(-1) on failure 
 int release_lock();
 
-// TODO: A fprintf that takes the lock, prints, calls fflush and fsync, releases the lock
-void myFprintf();
+// Busy waits for lock, prints to file, flushes and syncs to disk and releases lock
+void myFprintf(FILE* file, const char* format, ...);
 
 int pthread_mutex_lock(pthread_mutex_t* mutex){
-    // printf("WAIT MUTEX LOCK\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED MUTEX LOCK\n");
-    
     init_log_file();
 
     static int (*real_mutex_lock)(pthread_mutex_t*) = NULL;
@@ -58,42 +54,32 @@ int pthread_mutex_lock(pthread_mutex_t* mutex){
             exit(1);
         }
     }
+    
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     //Check if the mutex is blocked
     int err = pthread_mutex_trylock(mutex);
     if (err == EBUSY){
         // Print request to log file and release the lock
-        fprintf(log_file, "REQUEST %ld MUTEX %p\n", pthread_self(), mutex);
-        fflush(log_file);
-        fsync(fileno(log_file));
-
+        myFprintf(log_file, "REQUEST %ld MUTEX %p\n", pthread_self(), mutex);
         release_lock();
 
-        //Block until mutex is free and reaquire lock to continue printing
+        // Wait to get mutex and log lock
         err = real_mutex_lock(mutex);
-        while(!aquire_log_lock());
+        while (!aquire_log_lock());
     }
 
-    // After the mutex was taken print allocation message to log file and
-    if (err == 0)
-        fprintf(log_file, "ALLOCATE %ld MUTEX %p\n", pthread_self(), mutex);
-    else
-        perror("[ERROR] pthread_mutex_lock");
-    
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    // Print allocation
+    if (!err)
+        myFprintf(log_file, "ALLOCATE %ld MUTEX %p\n", pthread_self(), mutex);
+
     release_lock();
 
     return err;
 }
 
 int pthread_mutex_unlock(pthread_mutex_t* mutex){
-    // printf("WAIT MUTEX UNLOCK\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED MUTEX UNLOCK\n");
-
     init_log_file();
 
     static int (*real_mutex_unlock)(pthread_mutex_t*) = NULL;
@@ -106,32 +92,21 @@ int pthread_mutex_unlock(pthread_mutex_t* mutex){
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     // Making sure real_mutex_unlock returned successfully
     int err = real_mutex_unlock(mutex);
-    if (err != 0){
-        release_lock();
-        return err;
-    }
-
-    //Print the request to the log file
-    fprintf(log_file, "RELEASE %ld MUTEX %p\n", pthread_self(), mutex);
-
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    if (!err)
+        myFprintf(log_file, "RELEASE %ld MUTEX %p\n", pthread_self(), mutex);
+    
     release_lock();
 
-    return 0;
+    return err;
 }
 
 
 int sem_wait(sem_t* semaphore){
-    // printf("WAIT SEM WAIT\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED SEM WAIT\n");
-    
     init_log_file();
 
     static int (*real_sem_wait)(sem_t*) = NULL;
@@ -144,41 +119,32 @@ int sem_wait(sem_t* semaphore){
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
    //Check if the semaphore is blocked
     int err = sem_trywait(semaphore);
+
     if (err == -1 && errno == EAGAIN){
         // Print request to log file and release the lock
-        fprintf(log_file, "REQUEST %ld SEMAPHORE %p\n", pthread_self(), semaphore);
-        fflush(log_file);
-        fsync(fileno(log_file));
-
+        myFprintf(log_file, "REQUEST %ld SEMAPHORE %p\n", pthread_self(), semaphore);
         release_lock();
 
-        //Block until semaphore is free and reaquire lock to continue printing
+        // Wait to get the semaphore and the log lock
         err = real_sem_wait(semaphore);
-        while(!aquire_log_lock());
+        while (!aquire_log_lock());
     }
-    // After the semaphore signals print allocation message to log file and
-    if (err == 0)
-        fprintf(log_file, "ALLOCATE %ld SEMAPHORE %p\n", pthread_self(), semaphore);
-    else
-        perror("[ERROR] sem_wait");
-    
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+
+    // Print allocation
+    if (!err)
+        myFprintf(log_file, "ALLOCATE %ld SEMAPHORE %p\n", pthread_self(), semaphore);
+
     release_lock();
 
     return err;
 }
 
 int sem_post(sem_t* semaphore){
-    // printf("WAIT SEM POST\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED SEM_POST\n");
-
     init_log_file();
 
     static int (*real_sem_post)(sem_t*) = NULL;
@@ -191,33 +157,22 @@ int sem_post(sem_t* semaphore){
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     // Making sure real_sem_post returned successfully
     int err = real_sem_post(semaphore);
-    if (err != 0){
-        release_lock();
-        return err;
-    }
-
-    //Print the request to the log file
-    fprintf(log_file, "RELEASE %ld SEMAPHORE %p\n", pthread_self(), semaphore);
+    if (!err)
+        myFprintf(log_file, "RELEASE %ld SEMAPHORE %p\n", pthread_self(), semaphore);
     
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
     release_lock();
 
-    return 0;
+    return err;
 }
 
 
 int pthread_create(pthread_t *restrict thread, const pthread_attr_t *restrict attr,
                    void *(*start_routine)(void *), void *restrict arg){
-    // printf("WAIT PTHREAD CREATE\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED PTHREAD CREATE\n");
-
     init_log_file();
     
     static int (*real_pthread_create)(pthread_t *restrict,
@@ -233,21 +188,17 @@ int pthread_create(pthread_t *restrict thread, const pthread_attr_t *restrict at
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     //Checking if the thread was created successfully
     int err = real_pthread_create(thread, attr, start_routine, arg);
-    if (err){
-        release_lock();
-        return err;
-    }
-
-    //Print the request to the log file
-    fprintf(log_file, "CREATE THREAD %ld\n", *thread);
-
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    if (!err)
+        myFprintf(log_file, "CREATE THREAD %ld\n", *thread);
+    
     release_lock();
-    return 0;
+
+    return err;
 }
 
 int pthread_join(pthread_t thread, void** retval){
@@ -266,38 +217,21 @@ int pthread_join(pthread_t thread, void** retval){
     //Joining with thread
     int err = real_pthread_join(thread, retval);
 
-    // If join is successful aquire lock to write to log file
-    if (err == 0){
-        // printf("WAIT PTHREAD JOIN\n");
-        //Busy wait for log lock
-        while(!aquire_log_lock());
+    if (!err){
+        // Busy wait for lock
+        while (!aquire_log_lock());
 
-        // printf("PASSED PTHREAD JOIN\n");
-
-        //Print the request to the log file
-        fprintf(log_file, "DESTROY THREAD %ld\n", thread);
+        myFprintf(log_file, "DESTROY THREAD %ld\n", thread);
 
         release_lock();
     }
-    else{
-        printf("Failed pthread join %ld", pthread_self());
-    }
-
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    
     return err;
 }
 
 
 int pthread_mutex_init(pthread_mutex_t* restrict mutex,
                        const pthread_mutexattr_t* restrict attr){
-    // printf("WAIT MUTEX INIT\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED MUTEX INIT\n");
-
     init_log_file();
     
     static int (*real_mutex_init)(pthread_mutex_t* restrict,
@@ -313,30 +247,20 @@ int pthread_mutex_init(pthread_mutex_t* restrict mutex,
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     //Checking if the mutex was initialized successfully
     int err = real_mutex_init(mutex, attr);
-    if (err){
-        release_lock();
-        return err;
-    }
-
-    //Print the request to the log file
-    fprintf(log_file, "CREATE MUTEX %p\n", mutex);
-
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    if (!err)
+        myFprintf(log_file, "CREATE MUTEX %p\n", mutex);
+    
     release_lock();
-    return 0;
+    
+    return err;
 }
 
 int pthread_mutex_destroy(pthread_mutex_t* mutex){
-    // printf("WAIT MUTEX DESTROY\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED MUTEX DESTROY\n");
-
     init_log_file();
     
     static int (*real_mutex_destroy)(pthread_mutex_t*);
@@ -349,30 +273,20 @@ int pthread_mutex_destroy(pthread_mutex_t* mutex){
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     //Checking if the mutex was destroyed successfully
     int err = real_mutex_destroy(mutex);
-    if (err){
-        release_lock();
-        return err;
-    }
-
-    //Print the instruction to the log file
-    fprintf(log_file, "DESTROY MUTEX %p\n", mutex);
-
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    if (!err)
+        myFprintf(log_file, "DESTROY MUTEX %p\n", mutex);
+    
     release_lock();
-    return 0;
+
+    return err;
 }
 
 int sem_init(sem_t* semaphore, int pshared, unsigned int value){
-    // printf("WAIT SEM INIT\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED SEM INIT\n");
-
     init_log_file();
     
     static int (*real_sem_init)(sem_t*, int, unsigned int);
@@ -385,30 +299,20 @@ int sem_init(sem_t* semaphore, int pshared, unsigned int value){
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     //Checking if the semaphore was initialized successfully
     int err = real_sem_init(semaphore, pshared, value);
-    if (err){
-        release_lock();
-        return err;
-    }
-
-    //Print the instruction to log file
-    fprintf(log_file, "CREATE SEMAPHORE %p %u\n", semaphore, value);
-
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    if (!err)
+        myFprintf(log_file, "CREATE SEMAPHORE %p %u\n", semaphore, value);
+    
     release_lock();
-    return 0;
+    
+    return err;
 }
 
 int sem_destroy(sem_t* semaphore){
-    // printf("WAIT SEM DESTROY\n");
-    // //Busy wait for log lock
-    while(!aquire_log_lock());
-
-    // printf("PASSED SEM DESTROY\n");
-
     init_log_file();
     
     static int (*sem_destroy)(sem_t*);
@@ -421,21 +325,17 @@ int sem_destroy(sem_t* semaphore){
         }
     }
 
+    // Busy wait for lock
+    while (!aquire_log_lock());
+
     //Checking if the semaphore was destroyed successfully
     int err = sem_destroy(semaphore);
-    if (err){
-        release_lock();
-        return err;
-    }
-
-    //Print the instruction to the log file
-    fprintf(log_file, "DESTROY SEMAPHORE %p\n", semaphore);
-
-    //Making sure data gets to the disk
-    fflush(log_file);
-    fsync(fileno(log_file));
+    if (!err)
+        myFprintf(log_file, "DESTROY SEMAPHORE %p\n", semaphore);
+    
     release_lock();
-    return 0;
+
+    return err;
 }
 
 void init_log_file(){
@@ -446,7 +346,7 @@ void init_log_file(){
     printf("Initializing log file\n");
     log_file = fopen(log_file_name, "a");
     
-    //CHecking if file was actually opened successfully
+    //Checking if file was actually opened successfully
     if (log_file == NULL){
         perror("Opening log_file failed from sys_hook");
         exit(1);
@@ -476,4 +376,19 @@ int release_lock(){
     }
     printf("Suspect file: Released lock\n");
     return 0;
+}
+
+// prints to file, flushes and syncs to disk
+void myFprintf(FILE* file, const char* format, ...){
+    va_list args;
+    va_start(args, format);
+    
+    // Print to file
+    vfprintf(file, format, args);
+
+    // Flush and sync to disk
+    fflush(file);
+    fsync(fileno(file));
+    
+    va_end(args);
 }
