@@ -15,6 +15,7 @@
 #include <exception>
 #include <cstring>
 #include <string>
+#include <filesystem>
 using namespace std;
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
@@ -74,6 +75,8 @@ int aquire_log_lock();
 //Unlinks lock file, returns 0 on succes, displays error and exit(-1) on failure 
 int release_lock();
 
+bool fileExists(const string& file_name);
+
 class MyException : public exception{
 protected:
     string file_name, func_name, line, msg;
@@ -86,7 +89,33 @@ public:
         return msg.c_str();
     }
 };
-    
+
+class FileExistsException: public MyException{
+protected:
+    string open_f_name;
+public:
+    FileExistsException(const string& file_name, const string& func_name, int line, const string& open_f_name)
+        : MyException(file_name, func_name, line), open_f_name(open_f_name){
+            msg += "File is already open " + open_f_name;
+        }
+    virtual const char* what() const noexcept {
+        return msg.c_str();
+    }
+};
+
+class FileOpenException : public MyException{
+protected:
+    string open_f_name;
+public:
+    FileOpenException(const string& file_name, const string& func_name, int line, const string& open_f_name)
+        : MyException(file_name, func_name, line), open_f_name(open_f_name){
+            msg += "Could not open file " + open_f_name;
+        }
+    virtual const char* what() const noexcept {
+        return msg.c_str();
+    }
+};
+
 class FullResourceException : public MyException{
 private:
    const string& res_id;
@@ -119,7 +148,20 @@ public:
     }
 };
 
+// Simple wrapper class for ofstream that also keeps track of the file_name
+class MyOutFile{
+private:
+    ofstream stream;
+    string file_name;
+public:
+    MyOutFile(const string& file_name): file_name(file_name), stream(file_name){}
     
+    const string& getFileName() const {return file_name;}
+    ofstream& getStream() {return stream;}
+
+    void flush(){stream.flush();}
+};
+
 class DetectionResource{
 private:
     string id;
@@ -196,7 +238,7 @@ private:
     void _release (DetectionResource& res){
         // Increase count for resource
         res.increaseCount();
-        cout << "Thread " << this->id << " released " << res<< '\n';
+        cout << "Thread " << this->id << " released " << res << '\n';
 
         // res_counter[res_id].second += 1;
 
@@ -274,7 +316,7 @@ public:
     }
 
 
-    //Releases all alocated resources
+    //Releases all allocated resources
     void release(){
         for (auto it = allocated_res.begin(); it != allocated_res.end();){
             // Extract the resource node from map and move to the next resource
@@ -316,6 +358,7 @@ class DetectionAlgo{
 protected:
     unordered_map<string, shared_det_thread> threads;
     unordered_map<string, shared_det_res> resources;
+    shared_ptr<MyOutFile> deadlk_check_file;
 
     // Helper functions for public "parse"
     void parseCreate(const string& obj_type, const string& obj_id,
@@ -387,19 +430,24 @@ protected:
 
     //Helper function for public "clone"
     void cloneResources(DetectionAlgo& clone_algo){
-        cout << "   Cloning resources...\n";
+        ofstream& temp_stream = deadlk_check_file->getStream();
+
+        temp_stream << "   Cloning resources...\n";
         // Clone resources and restart their count for reallocation
         for (const auto& r: resources){
             const string& res_id = r.first;
             const shared_det_res& res = r.second;
+
             clone_algo.addResource(res_id, res->getResType(), res->getMaxCount());
-            cout << "       Cloned " << *clone_algo.resources[res_id] << "\n";
+            temp_stream << "       Cloned " << *clone_algo.resources[res_id] << "\n";
         }
-        cout << "   Cloned " << resources.size() << " resources\n";
+        temp_stream << "   Cloned " << resources.size() << " resources\n";
     }
 
     void cloneThreads(DetectionAlgo& clone_algo){
-        cout << "   Cloning threads...\n";
+        ofstream& temp_stream = deadlk_check_file->getStream();
+
+        temp_stream << "   Cloning threads...\n";
         for (const auto& t: threads){
             // Create thread with identical id
             const string& t_id = t.first;
@@ -409,55 +457,80 @@ protected:
             // Get the just cloned thread and clone it's allocations and requests
             shared_det_thread& clone_thread = clone_algo.threads[t_id];
 
-            cout << "   Thread " << t_id << ":\n";
+            temp_stream << "        Thread " << t_id << ":\n";
             cloneThreadAllocations(clone_thread, thread->getAllocatedRes(), clone_algo);
             cloneThreadRequests(clone_thread, thread->getRequestedRes(), clone_algo);
         }
-        cout << "   Cloned " << threads.size() << " threads\n";
+        temp_stream << "   Cloned " << threads.size() << " threads\n";
     }
 
     void cloneThreadAllocations(shared_det_thread& clone_thread,
                                 const unordered_map<string, shared_det_res>& cloned_res,
                                 DetectionAlgo& clone_algo){
         
+        ofstream& temp_stream = deadlk_check_file->getStream();
         // Going through the thread's allocated resources
         // And referencing their clones
-        cout << "       Cloning thread allocations...\n";
+        temp_stream << "           Cloning thread allocations...\n";
         for (const auto& t_r: cloned_res){
-            cout << "               Resource: " << *(t_r.second) << '\n';
+            temp_stream << "               Resource: " << *(t_r.second) << '\n';
             
             const string& t_res_id = t_r.first;
             const shared_det_res& t_clone_res = clone_algo.resources.at(t_res_id);
         
             clone_thread->allocate(t_res_id, t_clone_res);
         }
-        cout << "       Cloned " << cloned_res.size() << " allocations\n";
+        temp_stream << "           Cloned " << cloned_res.size() << " allocations\n";
     }
 
     void cloneThreadRequests(shared_det_thread& clone_thread,
                              const unordered_map<string, shared_det_res>& cloned_res,
                              DetectionAlgo& clone_algo){
+        ofstream& temp_stream = deadlk_check_file->getStream();
+
         //Going through the thread's requested resources
         // and referencing their clones
-        cout << "       Cloning Thread requests...\n";
+        temp_stream << "           Cloning Thread requests...\n";
         for (const auto& t_r: cloned_res){
-            cout << "               Resource: " << *(t_r.second) << '\n';
+            temp_stream << "                   Resource: " << *(t_r.second) << '\n';
             const string& t_res_id = t_r.first;
             const shared_det_res& t_clone_res = clone_algo.resources.at(t_res_id);
             clone_thread->request(t_res_id, t_clone_res);
         }
-        cout << "       Cloned " << cloned_res.size() << " requests\n";
+        temp_stream << "           Cloned " << cloned_res.size() << " requests\n";
     }
 
+    // For the clone, it doesn't need the file
+    DetectionAlgo(){}
 public:
+    DetectionAlgo(const string& file_name){
+        // Making sure the file gets created now if needed for writing
+        if (fileExists(file_name))
+            throw FileExistsException(__FILENAME__, __func__, __LINE__, file_name);
+        this->deadlk_check_file = make_shared<MyOutFile>(file_name);
+        this->deadlk_check_file->getStream() << "File Created\n";
+    }
+
+    // Closes and destroys file
+    ~DetectionAlgo(){
+        if (this->deadlk_check_file.use_count() == 1){
+            deadlk_check_file->getStream().close();
+            filesystem::remove(this->deadlk_check_file->getFileName());
+        }
+    }
+
     bool detect(){}
 
+    // Clones threads(including allocations and requests) and resources
+    // Shares the output file
     DetectionAlgo clone(){
-        cout << "Cloning deadlock algo...\n";
+        deadlk_check_file->getStream() << "Cloning deadlock algo...\n";
         DetectionAlgo clone_algo;
 
         cloneResources(clone_algo);
         cloneThreads(clone_algo);
+
+        deadlk_check_file->flush();
 
         return clone_algo;
     }
@@ -466,21 +539,23 @@ public:
     bool isSafeState(){
         // Getting current state of the algorithm
         DetectionAlgo clone_algo = clone();
+
+        ofstream& temp_stream = this->deadlk_check_file->getStream(); 
         
-        cout << "isSafeState: \n";
+        temp_stream << "isSafeState: \n";
         int i = 0;
 
         // An iteration is safe only if there exists at least one thread that can fulfill all it's requests
         bool is_safe = true;
         
         while (clone_algo.threads.size() > 1 && is_safe){
-            cout << "   Iteration " << i << '\n';
+            temp_stream << "   Iteration " << i << '\n';
 
             is_safe = false;
             // Removing the threads that can fullfill all their requests and freeing their resources
             for (auto it = clone_algo.threads.begin(); it != clone_algo.threads.end();)
                 if (it->second->canFulfillAllReq()){
-                    cout << "       Removing thread " << it->first << '\n';
+                    temp_stream << "       Removing thread " << it->first << '\n';
                     is_safe = true;
                     it->second->allocateFromRequested();
                     clone_algo.threads.erase(it++);
@@ -488,10 +563,12 @@ public:
                 else
                     it++;
             
-            cout << "       Remaining threads: " << clone_algo.threads.size() << '\n';
-            cout << "   Iteration " << i << " finished\n";
+            temp_stream << "       Remaining threads: " << clone_algo.threads.size() << '\n';
+            temp_stream << "   Iteration " << i << " finished\n";
             i++;
         }
+        deadlk_check_file->flush();
+
         return is_safe;
     }
 
@@ -561,8 +638,11 @@ int checkChildren(){
 }
 
 int main(){
+    // Not using string in order to share aquire_log_lock and release_lock with sys_hook.c
     const char log_file_name[] = "log_file.txt";
-    const char parent_debug_log_name[] = "p_debug_log.txt";
+    string parent_debug_log_name("p_debug_log.txt");
+    string deadlk_check_file_name("deadlk_check_file.txt");
+
     // Open log file and clear past contents
     ofstream clear_file(log_file_name, ifstream::out|ifstream::trunc);
     clear_file.close();
@@ -571,18 +651,21 @@ int main(){
     ifstream fin(log_file_name);
     off_t file_size = 0;
     std::streampos fin_pos = 0;
+
+    // Everything that gets read is also printed to this file
     ofstream fout(parent_debug_log_name);
 
+    // Creating child process for the deadlock suspect
     int rem_child_count = 1;
     pid_t pid = fork();
 
     //Child writes
     if (pid == 0){
         cout << "Child is executing...\n";
-        char* args[] = {"test_complex1", NULL};
+        char* args[] = {"test_complex2.exe", NULL};
         // Using the hooked functions
         char* env[] = {"LD_PRELOAD=./sys_hook.so", NULL};
-        int err = execve("test_complex1", args, env);
+        int err = execve("test_complex2.exe", args, env);
         if (err < 0){
             perror("Child execve");
             return -1;
@@ -591,9 +674,9 @@ int main(){
     else{ //Parent reads
         cout << "Parent is executing...\n";
         cout << "Child pid is " << pid << '\n';
-        DetectionAlgo deadlock_det;
+        DetectionAlgo deadlock_det(deadlk_check_file_name);
         // Execute until all children finished execution
-        while(rem_child_count > 0){
+        while(true || rem_child_count > 0){
             // Checking if there was actually something appended to the log file
             off_t curr_file_size = getFileSize(log_file_name);
             if (curr_file_size > file_size){
@@ -715,6 +798,12 @@ string toString(MessageTypes msg_type){
         default:
             return "";
     }
+}
+
+bool fileExists(const string& file_name){
+    ifstream fin(file_name);
+
+    return fin.good();
 }
 
 ostream& operator<<(ostream& out, const DetectionResource& res){
