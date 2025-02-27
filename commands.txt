@@ -1,0 +1,2 @@
+// Compile the shared library
+gcc -fPIC -shared -o sys_hook.so sys_hook.c -ldl
