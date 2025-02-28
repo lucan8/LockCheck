@@ -1,7 +1,7 @@
 # LockCheck- Deadlock and Starvation detection tool
 
 ## Description
-LockCheck started as a university project for the Operating Systems course. Now I work on it when I find the time
+LockCheck started as a university project for the Operating Systems course. Now I work on it when I find the time.
 At the moment it can only detect deadlocks in multithreaded applications that use the pthread and semaphore APIs(as the resources used can be mutexes and semaphores). In order to detect deadlock a modified version of the banker's algorithm was used.
 
 ## Usage
