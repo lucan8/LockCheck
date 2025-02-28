@@ -16,9 +16,11 @@
 #include <cstring>
 #include <string>
 #include <filesystem>
+#include <elf.h>
 using namespace std;
 
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : __FILE__)
+
 
 // Deadlock detection seems to work(finally)
 // For now we are just killing the process and printing
@@ -76,6 +78,12 @@ int aquire_log_lock();
 int release_lock();
 
 bool fileExists(const string& file_name);
+
+// Looks at the file header and checks whether it is an ELF executable
+bool isElfExecutable(const char* filepath);
+
+// Checks for user input and returns an error string if an error occurs, otherwise "" is returned
+string validateInput(int argc, char* argv[]);
 
 class MyException : public exception{
 protected:
@@ -505,19 +513,13 @@ protected:
 public:
     DetectionAlgo(const string& file_name){
         // Making sure the file gets created now if needed for writing
-        if (fileExists(file_name))
-            throw FileExistsException(__FILENAME__, __func__, __LINE__, file_name);
+        // if (fileExists(file_name))
+        //     throw FileExistsException(__FILENAME__, __func__, __LINE__, file_name);
         this->deadlk_check_file = make_shared<MyOutFile>(file_name);
         this->deadlk_check_file->getStream() << "File Created\n";
     }
 
-    // Closes and destroys file
-    ~DetectionAlgo(){
-        if (this->deadlk_check_file.use_count() == 1){
-            deadlk_check_file->getStream().close();
-            filesystem::remove(this->deadlk_check_file->getFileName());
-        }
-    }
+    ~DetectionAlgo(){}
 
     bool detect(){}
 
@@ -637,7 +639,15 @@ int checkChildren(){
     return term_child_count;
 }
 
-int main(){
+int main(int argc, char* argv[]){
+    string err_msg = validateInput(argc, argv);
+    if (err_msg != ""){
+        cerr << err_msg << '\n';
+        return -1;
+    }
+
+    char* in_exe_name = argv[1];
+
     // Not using string in order to share aquire_log_lock and release_lock with sys_hook.c
     const char log_file_name[] = "log_file.txt";
     string parent_debug_log_name("p_debug_log.txt");
@@ -649,6 +659,10 @@ int main(){
     
     // Open the file again in read mode
     ifstream fin(log_file_name);
+    if (!fin){
+        cerr << "[ERROR]: Could not open log file\n";
+        return -1;
+    }
     off_t file_size = 0;
     std::streampos fin_pos = 0;
 
@@ -662,10 +676,10 @@ int main(){
     //Child writes
     if (pid == 0){
         cout << "Child is executing...\n";
-        char* args[] = {"test_complex2.exe", NULL};
+        char* args[] = {in_exe_name, NULL};
         // Using the hooked functions
         char* env[] = {"LD_PRELOAD=./sys_hook.so", NULL};
-        int err = execve("test_complex2.exe", args, env);
+        int err = execve(in_exe_name, args, env);
         if (err < 0){
             perror("Child execve");
             return -1;
@@ -676,7 +690,10 @@ int main(){
         cout << "Child pid is " << pid << '\n';
         DetectionAlgo deadlock_det(deadlk_check_file_name);
         // Execute until all children finished execution
-        while(true || rem_child_count > 0){
+        while(rem_child_count > 0){
+            // Checking for terminated children
+            rem_child_count -= checkChildren();
+
             // Checking if there was actually something appended to the log file
             off_t curr_file_size = getFileSize(log_file_name);
             if (curr_file_size > file_size){
@@ -714,11 +731,6 @@ int main(){
                 fin.clear();
                 // Keep track of the last read positon
                 fin_pos = fin.tellg();
-                
-                // Checking for terminated children
-                // Done before releasing lock to avoid them writing to the file and terminating exactly before checking,
-                // As the changes would not be seen by the parent
-                rem_child_count -= checkChildren();
 
                 release_lock();
             }
@@ -750,6 +762,7 @@ int release_lock(){
     cout << "Deadlock Detection: Released lock\n";
     return 0;
 }
+
 // Splits by space the input string into a vector of strings
 vector<string> split(const string& input_s){
     vector<string> split_string;
@@ -804,6 +817,45 @@ bool fileExists(const string& file_name){
     ifstream fin(file_name);
 
     return fin.good();
+}
+
+// Looks at the file header and checks whether it is an ELF executable
+bool isElfExecutable(const char* filepath) {
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file) return false;
+
+    unsigned char magic[EI_NIDENT];
+    file.read(reinterpret_cast<char*>(magic), EI_NIDENT);
+    return file.gcount() == EI_NIDENT &&
+           magic[0] == ELFMAG0 &&
+           magic[1] == ELFMAG1 &&
+           magic[2] == ELFMAG2 &&
+           magic[3] == ELFMAG3;
+}
+
+// Checks for user input and returns an error string if an error occurs, otherwise "" is returned
+string validateInput(int argc, char* argv[]){
+    if (argc != 2)
+        return "[ERROR]: Invalid argument count. Correct usage ./lock_check ./[executable name]";
+    
+    char* in_exe_name = argv[1];
+    // Checking if the user provided a regular file
+    struct stat stat_buff;
+    if (stat(in_exe_name, &stat_buff) != 0)
+        return "[ERROR]: Trying to stat the file gives: " + (string)strerror(errno);
+    
+    if (!S_ISREG(stat_buff.st_mode))
+        return "[ERROR]: Inputed file is not a regular executable file";
+
+    // Check that the process has executing permission on the file
+    int err = access(in_exe_name, X_OK);
+    if (err < 0)
+        return "[ERROR]: Process does not have executing rights on the inputed file";
+    
+    if (!isElfExecutable(in_exe_name))
+        return "[ERROR]: Inputed file is not an ELF executable";
+    
+    return "";
 }
 
 ostream& operator<<(ostream& out, const DetectionResource& res){
