@@ -1,2 +1,5 @@
 *.so
 .vscode/
+*.exe
+log_file.txt
+.gitignore
